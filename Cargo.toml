@@ -1,0 +1,21 @@
+[package]
+name = "tauri-plugin-screenshot-hd"
+version = "0.1.0"
+description = "Tauri plugin for pixel-perfect native WKWebView screenshots — no SVG foreignObject, no Canvas 2D"
+license = "MIT"
+edition = "2021"
+repository = "https://github.com/netbulls/tauri-plugin-screenshot-hd"
+
+[features]
+# Include the plugin in release builds (debug-only by default)
+release = []
+
+[dependencies]
+tauri = "2"
+tiny_http = "0.12"
+log = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+block = "0.1"
