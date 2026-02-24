@@ -31,6 +31,7 @@
 extern crate objc;
 
 use std::io::Read;
+use std::sync::OnceLock;
 use tauri::{
     plugin::{Builder as PluginBuilder, TauriPlugin},
     Manager, Runtime,
@@ -77,16 +78,7 @@ pub fn init_with<R: Runtime>(config: Config) -> TauriPlugin<R> {
                 return Ok(());
             }
 
-            let window = app
-                .get_webview_window(&config.window_label)
-                .ok_or_else(|| {
-                    format!(
-                        "screenshot-hd: window '{}' not found. \
-                         Use init_with() to specify the correct window label.",
-                        config.window_label
-                    )
-                })?;
-
+            let app_handle = app.clone();
             let addr = format!("{}:{}", config.host, config.port);
 
             std::thread::spawn(move || {
@@ -99,7 +91,7 @@ pub fn init_with<R: Runtime>(config: Config) -> TauriPlugin<R> {
                 };
                 log::info!("[screenshot-hd] listening on http://{addr}");
 
-                serve_loop(server, window);
+                serve_loop(server, app_handle, config.window_label);
             });
 
             Ok(())
@@ -108,11 +100,42 @@ pub fn init_with<R: Runtime>(config: Config) -> TauriPlugin<R> {
 }
 
 /// Main HTTP server loop.
-fn serve_loop<R: Runtime>(server: tiny_http::Server, window: tauri::WebviewWindow<R>) {
+///
+/// The window is resolved lazily on first request — this avoids the race
+/// condition where the plugin's `setup` runs before windows are created.
+fn serve_loop<R: Runtime>(
+    server: tiny_http::Server,
+    app_handle: tauri::AppHandle<R>,
+    window_label: String,
+) {
+    let window_cell: OnceLock<tauri::WebviewWindow<R>> = OnceLock::new();
+
     loop {
         let mut request = match server.recv_timeout(std::time::Duration::from_millis(500)) {
             Ok(Some(r)) => r,
             Ok(None) | Err(_) => continue,
+        };
+
+        // Lazy window lookup
+        let window = match window_cell.get() {
+            Some(w) => w,
+            None => {
+                match app_handle.get_webview_window(&window_label) {
+                    Some(w) => {
+                        let _ = window_cell.set(w);
+                        window_cell.get().unwrap()
+                    }
+                    None => {
+                        let resp = tiny_http::Response::from_string(format!(
+                            "window '{}' not found yet — app may still be starting",
+                            window_label
+                        ))
+                        .with_status_code(503);
+                        let _ = request.respond(resp);
+                        continue;
+                    }
+                }
+            }
         };
 
         let url = request.url().to_string();
@@ -120,7 +143,7 @@ fn serve_loop<R: Runtime>(server: tiny_http::Server, window: tauri::WebviewWindo
 
         match path {
             "/screenshot" => {
-                match take_screenshot(&window) {
+                match take_screenshot(window) {
                     Ok(bytes) => {
                         let resp = tiny_http::Response::from_data(bytes).with_header(
                             "Content-Type: image/png"
@@ -165,7 +188,7 @@ fn serve_loop<R: Runtime>(server: tiny_http::Server, window: tauri::WebviewWindo
 
                 if let Some(ms) = wait_ms {
                     std::thread::sleep(std::time::Duration::from_millis(ms));
-                    match take_screenshot(&window) {
+                    match take_screenshot(window) {
                         Ok(bytes) => {
                             let resp = tiny_http::Response::from_data(bytes).with_header(
                                 "Content-Type: image/png"
